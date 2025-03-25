@@ -1,0 +1,6 @@
+argparse
+logging
+os
+csv
+pyzbar
+Pillow
