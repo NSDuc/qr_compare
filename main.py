@@ -6,97 +6,102 @@ from datetime import datetime
 from pyzbar.pyzbar import decode
 from PIL import Image
 
-class QRCodeFile:
-    def __init__(self, code, filepath):
-        self.code = str(code) if code is not None else None
+class DecodedObjectFile:
+    def __init__(self, code, type, filepath):
+        self.code = str(code) if code else None
+        self.type = type
         self.filepath = filepath
 
     def is_not_detected(self):
         return self.code is None
 
-class QRCodeFileIndex:
-    def create_from_qrcodes(qrcodes):
+class DecodedObjectFileIndex:
+    def create_index(dec_objs):
+        code2type = {}
         detected = {}
-        undetected = []
-        for qrcode in qrcodes:
-            if qrcode.is_not_detected():
-                undetected.append(qrcode.filepath)
+        undetected_objs = []
+        for obj in dec_objs:
+            if obj.is_not_detected():
+                undetected_objs.append(obj.filepath)
                 continue
-            
-            if qrcode.code not in detected:
-                detected[qrcode.code] = []
 
-            detected[qrcode.code].append(qrcode.filepath)
+            code2type[obj.code] = obj.type
 
-        return QRCodeFileIndex(detected, undetected)
+            if obj.code not in detected:
+                detected[obj.code] = []
 
-    def __init__(self, detected, undetected):
+            detected[obj.code].append(obj.filepath)
+
+        return DecodedObjectFileIndex(detected, undetected_objs, code2type)
+
+    def __init__(self, detected, undetected, code2type):
         self.detected = detected
         self.undetected = undetected
+        self._code2type_map = code2type
 
-class QRCodeDetector:
-    def detect_qrcode_id(filepath):
+    def get_decoded_object_type(self, code):
+        return self._code2type_map[code]
+
+class DecodedObjectDetector:
+    def detect_objects(filepath):
         """Detects a barcode in the given image file and returns the barcode data or None if detection fails."""
         try:
             image = Image.open(filepath)
-            qrs = decode(image)
-            if qrs:
-                return [qr.data.decode("utf-8") for qr in qrs]
+            objs = decode(image)
+            if objs:
+                return [DecodedObjectFile(obj.data.decode("utf-8"), obj.type, filepath) for obj in objs]
         except Exception as e:
             logging.error(f"Error detecting barcode in {filepath}: {e}")
         logging.warning("Detected NO barcode in file %s", filepath)
-        return [None]
+        return [DecodedObjectFile(None, None, filepath)]
 
-    def detect_qrcode_image(filepath):
-        qrcode_ids = QRCodeDetector.detect_qrcode_id(filepath)
-        return [QRCodeFile(qrcode_id, filepath) for qrcode_id in qrcode_ids]
-
-class QRCodeFolderComparison:
-    def __init__(self, qrindex, compare_dirpaths):
-        self.qrindex = qrindex
-        self.compare_dirpaths = compare_dirpaths
-        self.compare_result = {}
+class DecodedObjectFolderComparison:
+    def __init__(self, obj_index, cmp_dirpaths):
+        self.obj_index = obj_index
+        self.cmp_dirpaths = cmp_dirpaths
+        self.cmp_res = {}
 
     def compare(self):
-        for code, filepaths in self.qrindex.detected.items():
-            srccnts = [0 for _ in self.compare_dirpaths]
+        for code, filepaths in self.obj_index.detected.items():
+            count_arr = [0 for _ in self.cmp_dirpaths]
             for filepath in filepaths:
-                for i, dirpath in enumerate(self.compare_dirpaths):
+                for i, dirpath in enumerate(self.cmp_dirpaths):
                     if filepath.startswith(dirpath + os.sep):
-                        srccnts[i] += 1
+                        count_arr[i] += 1
 
-            if all(cnt == 1 for cnt in srccnts):
-                self.compare_result[code] = 'MATCHED'
-            elif any(cnt == 0 for cnt in srccnts):
-                self.compare_result[code] = 'MISSING'
-            elif any(cnt > 1 for cnt in srccnts):
-                self.compare_result[code] = 'DUPLICATED'
+            self.cmp_res[code] = []
+
+            if all(cnt == 1 for cnt in count_arr):
+                self.cmp_res[code].append('MATCH_ALL')
             else:
-                self.compare_result[code] = 'INVALID'
+                if any(cnt == 0 for cnt in count_arr):
+                    self.cmp_res[code].append('MISSING')
+                if any(cnt > 1 for cnt in count_arr):
+                    self.cmp_res[code].append('DUPLICATED')
 
-    def export_to_csv(self, report_filepath):
-        def format_cell_subpaths(subpaths):
-            return '\n'.join(subpaths)
+                if (len(self.cmp_res[code]) == 0):
+                    self.cmp_res[code].append('INVALID')
+        return self._compare_result()
 
-        with open(report_filepath, mode="w", newline="") as file:
-            writer = csv.writer(file)
-            header = ["Compare Result", "QR Code", *self.compare_dirpaths]
-            writer.writerow(header)
+    def _compare_result(self):
+        header = ["Compare Result", "CODE", "Decoded Type", *self.cmp_dirpaths]
+        rows = []
 
-            for code, filepaths in self.qrindex.detected.items():
-                row = [self.compare_result[code], code]
-                for dirpath in self.compare_dirpaths:
-                    subpaths = [os.path.relpath(fp, dirpath) for fp in filepaths if fp.startswith(dirpath + os.sep)]
-                    row.append(format_cell_subpaths(subpaths))
+        for code, filepaths in self.obj_index.detected.items():
+            row = [self.cmp_res[code], code, self.obj_index.get_decoded_object_type(code)]
+            for dirpath in self.cmp_dirpaths:
+                subpaths = [os.path.relpath(fp, dirpath) for fp in filepaths if fp.startswith(dirpath + os.sep)]
+                row.append(subpaths)
 
-                writer.writerow(row)
+            rows.append(row)
 
-            for fp in self.qrindex.undetected:
-                row = ["UN_DETECTED", ""]
-                for dirpath in self.compare_dirpaths:
-                    row.append(os.path.relpath(fp, dirpath) if fp.startswith(dirpath + os.sep) else "")
+        for fp in self.obj_index.undetected:
+            row = ["NO_DETECTED", "None", "None"]
+            for dirpath in self.cmp_dirpaths:
+                row.append(os.path.relpath(fp, dirpath) if fp.startswith(dirpath + os.sep) else "")
 
-                writer.writerow(row)
+            rows.append(row)
+        return header, rows
 
 def main():
     parser = argparse.ArgumentParser(description="Process command-line arguments.")
@@ -115,29 +120,38 @@ def main():
 
     for path in src_dirpaths:
         if not os.path.isdir(path):
-            logging.error("Invalid source directory: %s", path)
+            logging.error("Source directory does not exist: %s", path)
             exit(1)
 
     if not os.path.isdir(report_dirpath):
         logging.error("Report directory does not exist: %s", report_dirpath)
         exit(1)
 
-    qrcodes = []
+    dec_objs = []
     for src_dirpath in src_dirpaths:
         for dirpath, _, filenames in os.walk(src_dirpath):
             for filename in filenames:
                 filepath = os.path.join(dirpath, filename)
-                qrcodes_in_file= QRCodeDetector.detect_qrcode_image(filepath)
+                dec_objs_in_file = DecodedObjectDetector.detect_objects(filepath)
+                dec_objs.extend(dec_objs_in_file)
 
-                qrcodes.extend(qrcodes_in_file)
+    obj_index = DecodedObjectFileIndex.create_index(dec_objs)
 
-    qrindex = QRCodeFileIndex.create_from_qrcodes(qrcodes)
+    obj_compare = DecodedObjectFolderComparison(obj_index, src_dirpaths)
+    header, rows = obj_compare.compare()
 
-    qrcompare = QRCodeFolderComparison(qrindex, src_dirpaths)
-    qrcompare.compare()
-    qrcompare.export_to_csv(report_filepath)
-    logging.info("[Exported]: %s", report_filepath)
+    with open(report_filepath, mode="w", newline="") as file:
+        def format_csv_record(val):
+            if isinstance(val, (list, tuple)):
+                return '\n'.join(val)
+            else:
+                return val
 
+        writer = csv.writer(file)
+        writer.writerow(header)
+        for row in rows:
+            fmt_row = [format_csv_record(val) for val in row]
+            writer.writerow(fmt_row)
 
 if __name__ == "__main__":
     main()
